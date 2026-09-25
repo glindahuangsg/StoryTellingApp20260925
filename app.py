@@ -1,5 +1,6 @@
 import streamlit as st
 import torch
+import torchvision   # ✅ ensure torchvision is available
 from transformers import (
     BlipProcessor,
     BlipForConditionalGeneration,
@@ -11,7 +12,6 @@ from PIL import Image
 import io
 import soundfile as sf
 
-# ✅ Force CPU mode to reduce memory usage
 device = torch.device("cpu")
 
 # -----------------------------------------------------------
