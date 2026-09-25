@@ -4,3 +4,4 @@ torchvision==0.16.0
 transformers
 Pillow
 soundfile
+rich
