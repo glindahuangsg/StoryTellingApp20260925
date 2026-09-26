@@ -4,17 +4,16 @@ from PIL import Image
 import torch
 import io
 
-# Device setup
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# Force CPU mode (Streamlit Cloud usually has no GPU)
+device = "cpu"
 
-# Load models once (cached by Streamlit)
 @st.cache_resource
 def load_models():
     # Image captioning
     blip_processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
     blip_model = BlipForConditionalGeneration.from_pretrained(
         "Salesforce/blip-image-captioning-base",
-        dtype=torch.float32
+        dtype="float32"
     ).to(device)
 
     # Story generation (Gemma fine-tuned model)
@@ -22,11 +21,10 @@ def load_models():
     text_tokenizer = AutoTokenizer.from_pretrained(story_model_id)
     text_model = AutoModelForCausalLM.from_pretrained(
         story_model_id,
-        dtype=torch.bfloat16,
-        device_map="auto"
-    )
+        dtype="float32"
+    ).to(device)
 
-    # Text-to-speech pipeline
+    # Text-to-speech
     tts = pipeline("text-to-speech", model="facebook/mms-tts-eng")
 
     return blip_processor, blip_model, text_tokenizer, text_model, tts
@@ -46,7 +44,7 @@ def generate_story(caption):
         f"Make sure the story has a beginning, middle, and end, is 50–100 words long, "
         f"and finishes naturally."
     )
-    inputs = text_tokenizer(prompt, return_tensors="pt").to(text_model.device)
+    inputs = text_tokenizer(prompt, return_tensors="pt").to(device)
     output = text_model.generate(
         **inputs,
         max_new_tokens=220,
