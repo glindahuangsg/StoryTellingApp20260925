@@ -1,167 +1,86 @@
 import streamlit as st
-import torch
-import torchvision   # ✅ ensure torchvision is available
-from transformers import (
-    BlipProcessor,
-    BlipForConditionalGeneration,
-    AutoTokenizer,
-    AutoModelForSeq2SeqLM,
-    pipeline
-)
+from transformers import BlipProcessor, BlipForConditionalGeneration, AutoTokenizer, AutoModelForCausalLM, pipeline
 from PIL import Image
+import torch
 import io
-import soundfile as sf
 
-device = torch.device("cpu")
+# Device setup
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# -----------------------------------------------------------
-# Function: load_models
-# Purpose: Load and cache all AI models (image captioning, text generation, TTS)
-# -----------------------------------------------------------
+# Load models once (cached by Streamlit)
 @st.cache_resource
 def load_models():
-    # BLIP model for image captioning
+    # Image captioning
     blip_processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
     blip_model = BlipForConditionalGeneration.from_pretrained(
         "Salesforce/blip-image-captioning-base",
-        torch_dtype=torch.float32
+        dtype=torch.float32
     ).to(device)
 
-    # Instruction-tuned lightweight text model (Flan-T5-small)
-    text_model_id = "google/flan-t5-small"
-    text_tokenizer = AutoTokenizer.from_pretrained(text_model_id)
-    text_model = AutoModelForSeq2SeqLM.from_pretrained(
-        text_model_id,
-        torch_dtype=torch.float32
-    ).to(device)
+    # Story generation (Gemma fine-tuned model)
+    story_model_id = "DesuChan123/Gemma-Generate-Story-Model"
+    text_tokenizer = AutoTokenizer.from_pretrained(story_model_id)
+    text_model = AutoModelForCausalLM.from_pretrained(
+        story_model_id,
+        dtype=torch.bfloat16,
+        device_map="auto"
+    )
 
-    # Smaller TTS model for audio generation
-    try:
-        tts = pipeline("text-to-speech", model="espnet/kan-bayashi_ljspeech_vits")
-    except Exception:
-        tts = None  # fallback mode if TTS fails
+    # Text-to-speech pipeline
+    tts = pipeline("text-to-speech", model="facebook/mms-tts-eng")
 
     return blip_processor, blip_model, text_tokenizer, text_model, tts
 
-# Load models once and reuse
 blip_processor, blip_model, text_tokenizer, text_model, tts = load_models()
 
-# -----------------------------------------------------------
-# Function: img2text
-# Purpose: Generate a caption from an uploaded image using BLIP
-# -----------------------------------------------------------
-def img2text(image_file):
+# Functions
+def img2caption(image_file):
     raw_image = Image.open(image_file).convert("RGB")
     inputs = blip_processor(raw_image, return_tensors="pt").to(device)
-    out = blip_model.generate(**inputs, max_new_tokens=20)
+    out = blip_model.generate(**inputs, max_new_tokens=30)
     return blip_processor.decode(out[0], skip_special_tokens=True)
 
-# -----------------------------------------------------------
-# Function: generate_story
-# Purpose: Generate a bedtime story based on the image caption
-# -----------------------------------------------------------
-def generate_story(caption, text_tokenizer=text_tokenizer, text_model=text_model, device=device):
-    def run_prompt(prompt):
-        inputs = text_tokenizer(prompt, return_tensors="pt").to(device)
-        output = text_model.generate(
-            **inputs,
-            max_new_tokens=150,
-            min_length=60,
-            do_sample=True,
-            temperature=0.8,
-            top_p=0.9
-        )
-        return text_tokenizer.decode(output[0], skip_special_tokens=True).strip()
-
-    # ✅ Simplified parental narrator prompt
+def generate_story(caption):
     prompt = (
-        f"Once upon a time, my dear, let me tell you a gentle bedtime story. "
-        f"This story is about {caption}. "
-        f"It should sound like a parent speaking softly to their child, "
-        f"with a clear beginning, middle, and a happy ending."
+        f"Write a bedtime story for children aged 3–10 based on this caption: {caption}. "
+        f"Make sure the story has a beginning, middle, and end, is 50–100 words long, "
+        f"and finishes naturally."
     )
-    story = run_prompt(prompt)
+    inputs = text_tokenizer(prompt, return_tensors="pt").to(text_model.device)
+    output = text_model.generate(
+        **inputs,
+        max_new_tokens=220,
+        min_length=80,
+        do_sample=True,
+        temperature=0.8,
+        top_p=0.9,
+        pad_token_id=text_tokenizer.eos_token_id,
+    )
+    story = text_tokenizer.decode(output[0], skip_special_tokens=True).strip()
+    return story
 
-    # ✅ Retry with simpler parental voice if output is meta-text
-    bad_phrases = ["series", "post", "collection", "book", "illustration"]
-    if any(bp in story.lower() for bp in bad_phrases):
-        retry_prompt = (
-            f"Once upon a time, my dear, there was {caption}. "
-            f"Tell it as a short bedtime story in a parent's gentle voice, "
-            f"ending with comfort and happiness."
-        )
-        story = run_prompt(retry_prompt)
-
-    return story.strip()
-
-# -----------------------------------------------------------
-# Function: story_to_audio
-# Purpose: Convert the generated story into audio using TTS
-# -----------------------------------------------------------
 def story_to_audio(story_text):
-    if tts is None:
-        return None
-    try:
-        sentences = story_text.split(". ")
-        audio_buffers = []
-        for chunk in sentences:
-            if not chunk.strip():
-                continue
-            audio_out = tts(chunk.strip())
-            samples = audio_out["audio"]
-            rate = audio_out["sampling_rate"]
-            buf = io.BytesIO()
-            sf.write(buf, samples, rate, format="WAV")
-            buf.seek(0)
-            audio_buffers.append(buf.read())
-        return b"".join(audio_buffers)
-    except Exception:
-        return None
+    audio_out = tts(story_text)
+    return audio_out["audio"], audio_out["sampling_rate"]
 
-# -----------------------------------------------------------
-# Function: main
-# Purpose: Build kid-friendly UI
-# -----------------------------------------------------------
-def main():
-    st.set_page_config(page_title="Kids Story Generator", page_icon="📖", layout="centered")
+# Streamlit UI
+st.title("📖 Kids Storytelling App")
+st.write("Upload an image and let AI create a magical story with narration!")
 
-    # 🎨 Kid-friendly header
-    st.markdown(
-        "<h1 style='text-align:center; color:#FF69B4;'>🌈 Magical Storytime 🌈</h1>",
-        unsafe_allow_html=True
-    )
-    st.markdown(
-        "<p style='text-align:center; color:#228B22; font-size:22px;'>Upload a picture and let’s create a bedtime adventure together!</p>",
-        unsafe_allow_html=True
-    )
+uploaded_file = st.file_uploader("Choose an image...", type=["jpg", "jpeg", "png"])
 
-    uploaded_file = st.file_uploader("📷 Choose a fun picture", type=["jpg", "jpeg", "png"])
-    if uploaded_file is not None:
-        image = Image.open(uploaded_file)
-        st.image(image, caption="✨ Your Picture ✨", use_container_width=True)
+if uploaded_file is not None:
+    st.image(uploaded_file, caption="Uploaded Image", use_column_width=True)
 
-        if st.button("🎉 Generate Story"):
-            caption = img2text(uploaded_file)
-            st.success(f"📝 Magic Caption: {caption}")
+    if st.button("Generate Story"):
+        caption = img2caption(uploaded_file)
+        st.subheader("Generated Caption")
+        st.write(caption)
 
-            with st.spinner("✨ Hold on tight! Your magical bedtime story is being written... ✨"):
-                story = generate_story(caption)
+        story = generate_story(caption)
+        st.subheader("Generated Story")
+        st.write(story)
 
-            st.markdown(
-                f"<div style='background-color:#FFFACD; padding:20px; border-radius:15px; font-size:18px;'>"
-                f"<b>📖 Your Story:</b><br>{story}</div>",
-                unsafe_allow_html=True
-            )
-
-            audio_bytes = story_to_audio(story)
-            if audio_bytes:
-                st.audio(audio_bytes, format="audio/wav")
-                st.info("🔊 Sit back, relax, and listen to your magical story!")
-            else:
-                st.warning("🔊 Audio unavailable right now, but you can enjoy reading the story!")
-
-# -----------------------------------------------------------
-# Entry point
-# -----------------------------------------------------------
-if __name__ == "__main__":
-    main()
+        audio, rate = story_to_audio(story)
+        st.subheader("Listen to the Story")
+        st.audio(io.BytesIO(audio), format="audio/wav")
