@@ -1,8 +1,9 @@
 # ============================================================
 # Kids Story Generator - Image -> Story -> Audio
-# Streamlit Cloud ready
+# Optimized for Streamlit Cloud
 # ============================================================
 import io
+import traceback
 import numpy as np
 import scipy.io.wavfile as wavfile
 import streamlit as st
@@ -24,8 +25,9 @@ device = torch.device("cpu")
 # Function: load_models
 # Purpose: Load and cache all AI models (captioning, story, TTS)
 # -----------------------------------------------------------
-@st.cache_resource
+@st.cache_resource(show_spinner=False)
 def load_models():
+    """Load all models. Cached so they are loaded only once per session."""
     # 1. Image captioning model (BLIP)
     blip_processor = BlipProcessor.from_pretrained(
         "Salesforce/blip-image-captioning-base"
@@ -54,6 +56,7 @@ def load_models():
 # Purpose: Generate a caption from an uploaded image using BLIP
 # -----------------------------------------------------------
 def img2text(image_file, blip_processor, blip_model):
+    """Generate a short caption from the uploaded image."""
     raw_image = Image.open(image_file).convert("RGB")
     inputs = blip_processor(raw_image, return_tensors="pt").to(device)
     out = blip_model.generate(**inputs, max_new_tokens=20)
@@ -65,6 +68,8 @@ def img2text(image_file, blip_processor, blip_model):
 # Purpose: Generate a bedtime story based on the image caption
 # -----------------------------------------------------------
 def generate_story(caption, text_tokenizer, text_model):
+    """Expand the caption into a gentle bedtime story."""
+
     def run_prompt(prompt):
         inputs = text_tokenizer(prompt, return_tensors="pt").to(device)
         output = text_model.generate(
@@ -87,6 +92,7 @@ def generate_story(caption, text_tokenizer, text_model):
     )
     story = run_prompt(prompt)
 
+    # Retry if the story contains unwanted meta-words
     bad_phrases = ["series", "post", "collection", "book", "illustration"]
     if any(bp in story.lower() for bp in bad_phrases):
         retry_prompt = (
@@ -104,6 +110,7 @@ def generate_story(caption, text_tokenizer, text_model):
 # Purpose: Convert the generated story into a WAV audio buffer
 # -----------------------------------------------------------
 def story_to_audio(story_text, tts):
+    """Convert story text into a single WAV byte buffer."""
     if tts is None:
         return None
     try:
@@ -133,7 +140,9 @@ def story_to_audio(story_text, tts):
         buf.seek(0)
         return buf.read()
     except Exception as e:
+        # Show full traceback for debugging
         st.error(f"TTS error: {str(e)}")
+        st.code(traceback.format_exc())
         return None
 
 
@@ -160,16 +169,6 @@ def main():
         unsafe_allow_html=True,
     )
 
-    # Load models
-    with st.spinner("Loading models, please wait..."):
-        (
-            blip_processor,
-            blip_model,
-            text_tokenizer,
-            text_model,
-            tts,
-        ) = load_models()
-
     uploaded_file = st.file_uploader(
         "📷 Choose a fun picture", type=["jpg", "jpeg", "png"]
     )
@@ -179,13 +178,41 @@ def main():
         st.image(image, caption="✨ Your Picture ✨", use_container_width=True)
 
         if st.button("🎉 Generate Story"):
-            caption = img2text(uploaded_file, blip_processor, blip_model)
-            st.success(f"📝 Magic Caption: {caption}")
+            # Lazy load models only when needed
+            with st.spinner("Loading models, this may take a few minutes..."):
+                try:
+                    (
+                        blip_processor,
+                        blip_model,
+                        text_tokenizer,
+                        text_model,
+                        tts,
+                    ) = load_models()
+                except Exception as e:
+                    st.error(f"Model loading failed: {str(e)}")
+                    st.code(traceback.format_exc())
+                    st.stop()
 
+            # Step 1: Image -> Caption
+            with st.spinner("Looking at your picture..."):
+                try:
+                    caption = img2text(uploaded_file, blip_processor, blip_model)
+                    st.success(f"📝 Magic Caption: {caption}")
+                except Exception as e:
+                    st.error(f"Caption generation failed: {str(e)}")
+                    st.code(traceback.format_exc())
+                    st.stop()
+
+            # Step 2: Caption -> Story
             with st.spinner(
                 "✨ Hold on tight! Your magical bedtime story is being written... ✨"
             ):
-                story = generate_story(caption, text_tokenizer, text_model)
+                try:
+                    story = generate_story(caption, text_tokenizer, text_model)
+                except Exception as e:
+                    st.error(f"Story generation failed: {str(e)}")
+                    st.code(traceback.format_exc())
+                    st.stop()
 
             st.markdown(
                 f"<div style='background-color:#FFFACD; padding:20px; "
@@ -194,7 +221,10 @@ def main():
                 unsafe_allow_html=True,
             )
 
-            audio_bytes = story_to_audio(story, tts)
+            # Step 3: Story -> Audio
+            with st.spinner("Generating audio..."):
+                audio_bytes = story_to_audio(story, tts)
+
             if audio_bytes:
                 st.audio(audio_bytes, format="audio/wav")
                 st.info("🔊 Sit back, relax, and listen to your magical story!")
