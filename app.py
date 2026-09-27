@@ -39,7 +39,7 @@ def load_models():
     ).to(device)
 
     # 2. Story generation model (FLAN-T5-small)
-    text_model_id = "google/flan-t5-small"
+    text_model_id = "google/flan-t5-base"
     text_tokenizer = AutoTokenizer.from_pretrained(text_model_id)
     text_model = AutoModelForSeq2SeqLM.from_pretrained(
         text_model_id,
