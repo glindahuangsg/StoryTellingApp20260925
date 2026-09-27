@@ -1,7 +1,7 @@
 # ============================================================
 # Kids Story Generator - Image -> Story -> Audio
 # Optimized for Streamlit Cloud
-# Uses google/flan-t5-small for story generation
+# Uses roneneldan/TinyStories-28M for story generation
 # ============================================================
 import io
 import traceback
@@ -14,7 +14,7 @@ from transformers import (
     BlipProcessor,
     BlipForConditionalGeneration,
     AutoTokenizer,
-    AutoModelForSeq2SeqLM,
+    AutoModelForCausalLM,
     pipeline,
 )
 
@@ -38,15 +38,15 @@ def load_models():
         torch_dtype=torch.float32,
     ).to(device)
 
-    # 2. Story generation model (FLAN-T5-small)
-    text_model_id = "google/flan-t5-base"
+    # 2. Story generation model (TinyStories, causal LM)
+    text_model_id = "roneneldan/TinyStories-28M"
     text_tokenizer = AutoTokenizer.from_pretrained(text_model_id)
-    text_model = AutoModelForSeq2SeqLM.from_pretrained(
+    text_model = AutoModelForCausalLM.from_pretrained(
         text_model_id,
         torch_dtype=torch.float32,
     ).to(device)
 
-    # 3. Text-to-speech model (MMS-TTS, native transformers support)
+    # 3. Text-to-speech model (MMS-TTS)
     tts = pipeline("text-to-speech", model="facebook/mms-tts-eng")
 
     return blip_processor, blip_model, text_tokenizer, text_model, tts
@@ -66,37 +66,29 @@ def img2text(image_file, blip_processor, blip_model):
 
 # -----------------------------------------------------------
 # Function: generate_story
-# Purpose: Generate a children's story using FLAN-T5-small
+# Purpose: Generate a children's story using TinyStories (causal LM)
 # -----------------------------------------------------------
 def generate_story(caption, text_tokenizer, text_model):
-    """Generate a short children's story using FLAN-T5-small."""
+    """Generate a children's story using TinyStories (causal LM)."""
 
     def run_prompt(prompt):
         inputs = text_tokenizer(prompt, return_tensors="pt").to(device)
         output = text_model.generate(
             **inputs,
-            max_new_tokens=150,        # control story length
-            min_length=60,             # avoid too short
-            do_sample=True,            # sampling for variety
-            temperature=0.9,           # slightly more creative
-            top_p=0.9,                 # nucleus sampling
-            repetition_penalty=1.5,    # penalize repetition
-            num_beams=1,               # sampling instead of beam search
+            max_new_tokens=200,
+            do_sample=True,
+            temperature=0.8,
+            top_p=0.9,
+            repetition_penalty=1.2,
+            pad_token_id=text_tokenizer.eos_token_id,
         )
-        return text_tokenizer.decode(output[0], skip_special_tokens=True).strip()
+        # For causal LM, only decode newly generated tokens
+        generated = output[0][inputs["input_ids"].shape[1]:]
+        return text_tokenizer.decode(generated, skip_special_tokens=True).strip()
 
-    # Simplified prompt: clear instruction + story opening
-    prompt = (
-        f"Write a short children's story about {caption}. "
-        f"Start with 'Once upon a time' and end with 'The end.'"
-    )
+    # TinyStories only needs a simple story opening
+    prompt = f"Once upon a time, there was a {caption}. "
     story = run_prompt(prompt)
-
-    # Retry if the story is too short or contains unwanted meta-words
-    bad_phrases = ["series", "post", "collection", "book", "illustration"]
-    if len(story) < 50 or any(bp in story.lower() for bp in bad_phrases):
-        retry_prompt = f"Tell a very short story about {caption}."
-        story = run_prompt(retry_prompt)
 
     return story.strip()
 
@@ -136,7 +128,6 @@ def story_to_audio(story_text, tts):
         buf.seek(0)
         return buf.read()
     except Exception as e:
-        # Show full traceback for debugging
         st.error(f"TTS error: {str(e)}")
         st.code(traceback.format_exc())
         return None
