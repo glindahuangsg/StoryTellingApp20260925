@@ -1,151 +1,211 @@
 # ============================================================
-# Children's Story Generator - Image -> Story -> Audio
-# Streamlit Cloud Ready Version
+# Kids Story Generator - Image -> Story -> Audio
+# Streamlit Cloud ready
 # ============================================================
 import io
 import numpy as np
 import scipy.io.wavfile as wavfile
 import streamlit as st
+import torch
 from PIL import Image
-from transformers import pipeline
+from transformers import (
+    BlipProcessor,
+    BlipForConditionalGeneration,
+    AutoTokenizer,
+    AutoModelForSeq2SeqLM,
+    pipeline,
+)
+
+# Force CPU to reduce memory usage on Streamlit Cloud
+device = torch.device("cpu")
 
 
+# -----------------------------------------------------------
+# Function: load_models
+# Purpose: Load and cache all AI models (captioning, story, TTS)
+# -----------------------------------------------------------
 @st.cache_resource
-def load_captioner():
-    """Load BLIP image captioning model from Hugging Face Hub."""
-    return pipeline(
-        "image-to-text",
-        model="Salesforce/blip-image-captioning-base"
+def load_models():
+    # 1. Image captioning model (BLIP)
+    blip_processor = BlipProcessor.from_pretrained(
+        "Salesforce/blip-image-captioning-base"
     )
+    blip_model = BlipForConditionalGeneration.from_pretrained(
+        "Salesforce/blip-image-captioning-base",
+        torch_dtype=torch.float32,
+    ).to(device)
+
+    # 2. Story generation model (FLAN-T5)
+    text_model_id = "google/flan-t5-small"
+    text_tokenizer = AutoTokenizer.from_pretrained(text_model_id)
+    text_model = AutoModelForSeq2SeqLM.from_pretrained(
+        text_model_id,
+        torch_dtype=torch.float32,
+    ).to(device)
+
+    # 3. Text-to-speech model (MMS-TTS, native transformers support)
+    tts = pipeline("text-to-speech", model="facebook/mms-tts-eng")
+
+    return blip_processor, blip_model, text_tokenizer, text_model, tts
 
 
-@st.cache_resource
-def load_story_generator():
-    """Load GPT-2 text generation model from Hugging Face Hub."""
-    return pipeline(
-        "text-generation",
-        model="gpt2"
-    )
+# -----------------------------------------------------------
+# Function: img2text
+# Purpose: Generate a caption from an uploaded image using BLIP
+# -----------------------------------------------------------
+def img2text(image_file, blip_processor, blip_model):
+    raw_image = Image.open(image_file).convert("RGB")
+    inputs = blip_processor(raw_image, return_tensors="pt").to(device)
+    out = blip_model.generate(**inputs, max_new_tokens=20)
+    return blip_processor.decode(out[0], skip_special_tokens=True)
 
 
-@st.cache_resource
-def load_tts():
-    """Load MMS-TTS English model from Hugging Face Hub."""
-    return pipeline(
-        "text-to-speech",
-        model="facebook/mms-tts-eng"
-    )
+# -----------------------------------------------------------
+# Function: generate_story
+# Purpose: Generate a bedtime story based on the image caption
+# -----------------------------------------------------------
+def generate_story(caption, text_tokenizer, text_model):
+    def run_prompt(prompt):
+        inputs = text_tokenizer(prompt, return_tensors="pt").to(device)
+        output = text_model.generate(
+            **inputs,
+            max_new_tokens=180,
+            min_length=80,
+            do_sample=True,
+            temperature=0.8,
+            top_p=0.9,
+        )
+        return text_tokenizer.decode(output[0], skip_special_tokens=True).strip()
 
-
-def generate_caption(captioner, image):
-    """Generate a short caption from the uploaded image."""
-    result = captioner(image)
-    return result[0]["generated_text"]
-
-
-def generate_story(story_generator, caption):
-    """Expand the caption into a short children's story."""
     prompt = (
-        f"Write a short, happy story for children (50-100 words). "
-        f"The story is about: {caption}. Story:"
+        f"Once upon a time, my dear, let me tell you a gentle bedtime story. "
+        f"This story is about {caption}. "
+        f"It should sound like a parent speaking softly to their child, "
+        f"with a clear beginning, middle, and a happy ending. "
+        f"End with a comforting line such as "
+        f"'and now you can rest peacefully, knowing everything is safe and happy.'"
     )
-    result = story_generator(
-        prompt,
-        max_new_tokens=120,
-        do_sample=True,
-        temperature=0.7,
-        top_p=0.9,
-        num_return_sequences=1
-    )
-    story = result[0]["generated_text"]
-    story = story.replace(prompt, "").strip()
-    return story
+    story = run_prompt(prompt)
+
+    bad_phrases = ["series", "post", "collection", "book", "illustration"]
+    if any(bp in story.lower() for bp in bad_phrases):
+        retry_prompt = (
+            f"Once upon a time, my dear, there was {caption}. "
+            f"Tell it as a short bedtime story in a parent's gentle voice, "
+            f"ending with comfort and happiness."
+        )
+        story = run_prompt(retry_prompt)
+
+    return story.strip()
 
 
-def generate_audio(tts, story):
-    """Convert the story text into a WAV audio buffer."""
-    speech = tts(story)
-    audio_array = np.array(speech["audio"]).squeeze()
-    sample_rate = speech["sampling_rate"]
+# -----------------------------------------------------------
+# Function: story_to_audio
+# Purpose: Convert the generated story into a WAV audio buffer
+# -----------------------------------------------------------
+def story_to_audio(story_text, tts):
+    if tts is None:
+        return None
+    try:
+        # Split story into sentence chunks
+        sentences = story_text.replace("\n", " ").split(". ")
+        audio_chunks = []
+        sample_rate = None
 
-    wav_buffer = io.BytesIO()
-    wavfile.write(wav_buffer, sample_rate, audio_array)
-    wav_buffer.seek(0)
-    return wav_buffer
+        for chunk in sentences:
+            chunk = chunk.strip()
+            if not chunk:
+                continue
+            audio_out = tts(chunk)
+            samples = np.array(audio_out["audio"]).squeeze()
+            sample_rate = audio_out["sampling_rate"]
+            audio_chunks.append(samples)
+
+        if not audio_chunks:
+            return None
+
+        # Concatenate all audio chunks
+        full_audio = np.concatenate(audio_chunks)
+
+        # Write to an in-memory WAV buffer
+        buf = io.BytesIO()
+        wavfile.write(buf, sample_rate, full_audio)
+        buf.seek(0)
+        return buf.read()
+    except Exception as e:
+        st.error(f"TTS error: {str(e)}")
+        return None
 
 
+# -----------------------------------------------------------
+# Function: main
+# Purpose: Build the Streamlit UI
+# -----------------------------------------------------------
 def main():
-    """Main Streamlit application entry point."""
     st.set_page_config(
-        page_title="Children's Story Generator",
-        page_icon="🧸",
-        layout="centered"
+        page_title="Kids Story Generator",
+        page_icon="📖",
+        layout="centered",
     )
 
-    st.title("🧸 Children's Story Generator")
-    st.caption("Upload an image, and AI will tell you a fun little story!")
+    # Kid-friendly header
+    st.markdown(
+        "<h1 style='text-align:center; color:#FF69B4;'>🌟 Magical Storytime 🌟</h1>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        "<p style='text-align:center; color:#228B22; font-size:22px;'>"
+        "Upload a picture and let's create a bedtime adventure together!"
+        "</p>",
+        unsafe_allow_html=True,
+    )
 
-    with st.sidebar:
-        st.header("ℹ️ About This App")
-        st.markdown("""
-        - **Image Captioning**: `Salesforce/blip-image-captioning-base`
-        - **Story Generation**: `gpt2`
-        - **Text-to-Speech**: `facebook/mms-tts-eng`
-        """)
-        st.divider()
-        st.caption("🎈 Suitable for children aged 3-10")
-
-    with st.spinner("Loading models, this may take a few minutes on first run..."):
-        try:
-            captioner = load_captioner()
-            story_generator = load_story_generator()
-            tts = load_tts()
-            st.success("✅ Models loaded successfully")
-        except Exception as e:
-            st.error(f"❌ Model loading failed: {str(e)}")
-            st.stop()
+    # Load models
+    with st.spinner("Loading models, please wait..."):
+        (
+            blip_processor,
+            blip_model,
+            text_tokenizer,
+            text_model,
+            tts,
+        ) = load_models()
 
     uploaded_file = st.file_uploader(
-        "📤 Upload an image",
-        type=["jpg", "jpeg", "png"]
+        "📷 Choose a fun picture", type=["jpg", "jpeg", "png"]
     )
 
     if uploaded_file is not None:
-        image = Image.open(uploaded_file).convert("RGB")
-        st.image(image, caption="Your uploaded image", use_container_width=True)
+        image = Image.open(uploaded_file)
+        st.image(image, caption="✨ Your Picture ✨", use_container_width=True)
 
-        if st.button("✨ Generate Story", type="primary"):
-            try:
-                with st.spinner("Looking at the image..."):
-                    caption = generate_caption(captioner, image)
-                    st.info(f"📷 Image caption: {caption}")
+        if st.button("🎉 Generate Story"):
+            caption = img2text(uploaded_file, blip_processor, blip_model)
+            st.success(f"📝 Magic Caption: {caption}")
 
-                with st.spinner("Writing the story..."):
-                    story = generate_story(story_generator, caption)
+            with st.spinner(
+                "✨ Hold on tight! Your magical bedtime story is being written... ✨"
+            ):
+                story = generate_story(caption, text_tokenizer, text_model)
 
-                st.subheader("📖 Generated Story")
-                st.write(story)
+            st.markdown(
+                f"<div style='background-color:#FFFACD; padding:20px; "
+                f"border-radius:15px; font-size:18px;'>"
+                f"<b>📖 Your Story:</b><br>{story}</div>",
+                unsafe_allow_html=True,
+            )
 
-                with st.spinner("Generating audio..."):
-                    wav_buffer = generate_audio(tts, story)
-
-                st.subheader("🔊 Audio Version")
-                st.audio(wav_buffer, format="audio/wav")
-
-            except Exception as e:
-                st.error(f"An error occurred during generation: {str(e)}")
-
-    st.divider()
-    with st.expander("🔧 Technical Details"):
-        st.markdown("""
-        **Pipeline Flow**: `Image Upload` → `BLIP Captioning` → `GPT-2 Story Generation` → `Hugging Face TTS`
-
-        **Three Pipelines**:
-        1. `image-to-text`: Salesforce/blip-image-captioning-base
-        2. `text-generation`: gpt2
-        3. `text-to-speech`: facebook/mms-tts-eng
-        """)
+            audio_bytes = story_to_audio(story, tts)
+            if audio_bytes:
+                st.audio(audio_bytes, format="audio/wav")
+                st.info("🔊 Sit back, relax, and listen to your magical story!")
+            else:
+                st.warning(
+                    "🔊 Audio unavailable right now, but you can enjoy reading the story!"
+                )
 
 
+# -----------------------------------------------------------
+# Entry point
+# -----------------------------------------------------------
 if __name__ == "__main__":
     main()
