@@ -13,7 +13,7 @@ from transformers import (
     BlipProcessor,
     BlipForConditionalGeneration,
     AutoTokenizer,
-    AutoModelForSeq2SeqLM,
+    AutoModelForCausalLM,
     pipeline,
 )
 
@@ -37,10 +37,10 @@ def load_models():
         torch_dtype=torch.float32,
     ).to(device)
 
-    # 2. Story generation model (FLAN-T5)
-    text_model_id = "google/flan-t5-small"
+    # 2. Story generation model (TinyStories-17M, causal LM)
+    text_model_id = "kaushik-harsh-99/TinyStories-17M"
     text_tokenizer = AutoTokenizer.from_pretrained(text_model_id)
-    text_model = AutoModelForSeq2SeqLM.from_pretrained(
+    text_model = AutoModelForCausalLM.from_pretrained(
         text_model_id,
         torch_dtype=torch.float32,
     ).to(device)
@@ -68,37 +68,34 @@ def img2text(image_file, blip_processor, blip_model):
 # Purpose: Generate a bedtime story based on the image caption
 # -----------------------------------------------------------
 def generate_story(caption, text_tokenizer, text_model):
-    """Expand the caption into a gentle bedtime story."""
+    """Expand the caption into a gentle bedtime story using TinyStories."""
 
     def run_prompt(prompt):
         inputs = text_tokenizer(prompt, return_tensors="pt").to(device)
         output = text_model.generate(
             **inputs,
-            max_new_tokens=180,
-            min_length=80,
+            max_new_tokens=200,
             do_sample=True,
             temperature=0.8,
             top_p=0.9,
+            repetition_penalty=1.2,
+            pad_token_id=text_tokenizer.eos_token_id,
         )
-        return text_tokenizer.decode(output[0], skip_special_tokens=True).strip()
+        # For causal LM, decode only the newly generated tokens
+        generated = output[0][inputs["input_ids"].shape[1]:]
+        return text_tokenizer.decode(generated, skip_special_tokens=True).strip()
 
     prompt = (
-        f"Once upon a time, my dear, let me tell you a gentle bedtime story. "
-        f"This story is about {caption}. "
-        f"It should sound like a parent speaking softly to their child, "
-        f"with a clear beginning, middle, and a happy ending. "
-        f"End with a comforting line such as "
-        f"'and now you can rest peacefully, knowing everything is safe and happy.'"
+        f"Once upon a time, there was a {caption}. "
+        f"The story goes like this: "
     )
     story = run_prompt(prompt)
 
-    # Retry if the story contains unwanted meta-words
+    # Retry if the story is too short or contains unwanted meta-words
     bad_phrases = ["series", "post", "collection", "book", "illustration"]
-    if any(bp in story.lower() for bp in bad_phrases):
+    if len(story) < 50 or any(bp in story.lower() for bp in bad_phrases):
         retry_prompt = (
-            f"Once upon a time, my dear, there was {caption}. "
-            f"Tell it as a short bedtime story in a parent's gentle voice, "
-            f"ending with comfort and happiness."
+            f"Once upon a time, there was a {caption}. "
         )
         story = run_prompt(retry_prompt)
 
