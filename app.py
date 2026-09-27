@@ -65,11 +65,31 @@ def img2text(image_file, blip_processor, blip_model):
 
 
 # -----------------------------------------------------------
+# Function: clean_caption
+# Purpose: Clean up the caption from BLIP for story generation
+# -----------------------------------------------------------
+def clean_caption(caption):
+    """Clean up the caption so it flows naturally into a story opening."""
+    caption = caption.replace("a a ", "a ")
+    caption = caption.replace("an a ", "a ")
+    caption = caption.strip().rstrip(".")
+    # Remove leading articles so we can embed it naturally
+    for prefix in ["a ", "an ", "the "]:
+        if caption.lower().startswith(prefix):
+            caption = caption[len(prefix):]
+            break
+    return caption
+
+
+# -----------------------------------------------------------
 # Function: generate_story
 # Purpose: Generate a children's story using TinyStories (causal LM)
 # -----------------------------------------------------------
 def generate_story(caption, text_tokenizer, text_model):
     """Generate a children's story using TinyStories (causal LM)."""
+
+    # Clean up the caption first
+    caption = clean_caption(caption)
 
     def run_prompt(prompt):
         inputs = text_tokenizer(prompt, return_tensors="pt").to(device)
@@ -86,8 +106,11 @@ def generate_story(caption, text_tokenizer, text_model):
         generated = output[0][inputs["input_ids"].shape[1]:]
         return text_tokenizer.decode(generated, skip_special_tokens=True).strip()
 
-    # TinyStories only needs a simple story opening
-    prompt = f"Once upon a time, there was a {caption}. "
+    # Wrap caption into a natural story opening
+    prompt = (
+        f"Once upon a time, there was a little child who saw {caption}. "
+        f"The child was very curious and wanted to know more. "
+    )
     story = run_prompt(prompt)
 
     return story.strip()
